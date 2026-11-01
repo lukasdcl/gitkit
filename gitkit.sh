@@ -4,7 +4,8 @@
 #
 # Drop this file into a folder and run it:
 #
-#   ./gitkit.sh              menu (or first-time setup if the folder isn't a repo yet)
+#   ./gitkit.sh              menu - or, in a folder that isn't a repo yet, upload it
+#                            to GitHub or download a GitHub repo into it
 #   ./gitkit.sh <command>    run one command directly, e.g. ./gitkit.sh branch my-idea
 #   ./gitkit.sh help         list every command
 #
@@ -140,11 +141,7 @@ ignore_has() {
 
 ensure_gitignore() {
     if [ ! -f .gitignore ]; then
-        {
-            gitignore_defaults
-            printf '\n# Local helper scripts (not part of the project)\n'
-            helper_ignore_lines
-        } > .gitignore
+        generated_gitignore > .gitignore
         ok "Created .gitignore"
         return
     fi
@@ -187,10 +184,8 @@ ensure_gitignore() {
 # push.sh helper (written out if the folder doesn't have one)
 # ---------------------------------------------------------------------------
 
-ensure_push_helper() {
-    [ "$SELF_NAME" = "push.sh" ] && return
-    [ -e push.sh ] && return
-    cat > push.sh <<'PUSH_SH'
+push_sh_content() {
+    cat <<'PUSH_SH'
 #!/bin/bash
 # Stage everything, ask what changed, commit and push.
 # Usage:  ./push.sh          (asks for the message)
@@ -227,8 +222,43 @@ git commit -m "$msg"
 git push
 echo "Pushed."
 PUSH_SH
+}
+
+ensure_push_helper() {
+    [ "$SELF_NAME" = "push.sh" ] && return
+    [ -e push.sh ] && return
+    push_sh_content > push.sh
     chmod +x push.sh
     ok "Created push.sh"
+}
+
+# ---------------------------------------------------------------------------
+# Is the folder empty apart from gitkit's own files?
+# ---------------------------------------------------------------------------
+
+generated_gitignore() {
+    gitignore_defaults
+    printf '\n# Local helper scripts (not part of the project)\n'
+    helper_ignore_lines
+}
+
+# True for files gitkit itself put here (or junk), which are safe to replace.
+is_helper_file() {
+    case "$1" in
+        "$SELF_NAME"|.DS_Store) return 0 ;;
+        push.sh)    [ -f push.sh ]    && [ "$(cat push.sh)"    = "$(push_sh_content)" ] ;;
+        .gitignore) [ -f .gitignore ] && [ "$(cat .gitignore)" = "$(generated_gitignore)" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+folder_is_empty() {
+    local f
+    for f in * .[!.]* ..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        is_helper_file "$f" || return 1
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -361,21 +391,19 @@ create_remote_repo() {
     return 0
 }
 
-setup_repo() {
-    title "Connect this folder to GitHub"
-    say "Folder: $HERE"
+check_parent_repo() {
+    local parent
+    [ -e .git ] && return 0
+    parent="$(git rev-parse --show-toplevel 2>/dev/null)"
+    [ -z "$parent" ] && return 0
+    warn "This folder is inside another git repo ($parent)."
+    confirm "Make it a separate repo anyway?"
+}
 
-    local created_git=0 repo url branch n msg parent
-    if [ ! -e .git ]; then
-        parent="$(git rev-parse --show-toplevel 2>/dev/null)"
-        if [ -n "$parent" ]; then
-            warn "This folder is inside another git repo ($parent)."
-            confirm "Make it a separate repo anyway?" || exit 0
-        fi
-    fi
-
+# ask_repo "verb"  -> sets $repo (owner/name) and $url, then checks it on GitHub
+ask_repo() {
     while :; do
-        ask "GitHub repo to push to (e.g. your-name/my-project):"
+        ask "GitHub repo to $1 (e.g. your-name/my-project):"
         [ -z "$REPLY" ] && exit 0
         repo="$(normalise_repo "$REPLY")" && break
         warn "That doesn't look like owner/repo-name - try again, or press Enter to quit."
@@ -387,8 +415,19 @@ setup_repo() {
     case "$REMOTE_STATE" in
         noauth)  die "GitHub refused your SSH key. Check it with:  ssh -T git@github.com" ;;
         error)   die "Couldn't reach GitHub:"$'\n'"$REMOTE_ERR" ;;
-        missing) create_remote_repo "$repo" "$url" || exit 1 ;;
     esac
+}
+
+setup_repo() {
+    title "Upload this folder to GitHub"
+    say "Folder: $HERE"
+
+    local created_git=0 repo url branch n msg
+    check_parent_repo || exit 0
+    ask_repo "push to"
+    if [ "$REMOTE_STATE" = "missing" ]; then
+        create_remote_repo "$repo" "$url" || exit 1
+    fi
 
     # Use the remote's default branch name so we replace it rather than adding a
     # second branch next to it. Brand-new repos get "main".
@@ -474,6 +513,107 @@ setup_repo() {
 
     echo
     say "From now on, run ${B}./$SELF_NAME${R} for the menu, or ${B}./push.sh${R} to commit and push."
+}
+
+# ---------------------------------------------------------------------------
+# First-time setup: download a GitHub repo into this folder
+# ---------------------------------------------------------------------------
+
+download_repo() {
+    title "Download a GitHub repo into this folder"
+    say "Folder: $HERE"
+
+    local repo url tmp f name clashes=() n
+    check_parent_repo || exit 0
+    ask_repo "download"
+    case "$REMOTE_STATE" in
+        missing) die "github.com/$repo doesn't exist (or your SSH key can't see it)." ;;
+        empty)   say "github.com/$repo is empty, so there's nothing to download."
+                 say "Put your files in this folder and run gitkit again to upload them."
+                 exit 0 ;;
+    esac
+
+    # git won't clone into a folder that isn't empty, so clone next to it first.
+    tmp="$(mktemp -d "$HERE/.gitkit-download.XXXXXX")" || die "Couldn't make a temporary folder."
+    trap 'rm -rf "$tmp"' EXIT
+    info "Downloading..."
+    git clone -q "$url" "$tmp" || die "The download failed (see the message above)."
+
+    # Refuse to overwrite anything of yours. gitkit's own files are fine to replace.
+    for f in "$tmp"/* "$tmp"/.[!.]* "$tmp"/..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        name="$(basename "$f")"
+        [ "$name" = ".git" ] && continue
+        if { [ -e "$name" ] || [ -L "$name" ]; } && ! is_helper_file "$name"; then
+            clashes+=("$name")
+        fi
+    done
+    if [ ${#clashes[@]} -gt 0 ]; then
+        err "These are already in this folder and also in the repo, so nothing was changed:"
+        printf '    %s\n' "${clashes[@]}"
+        say "  Move them out of the way (or use an empty folder) and run gitkit again."
+        exit 1
+    fi
+
+    # Move everything in. mv (not cp) also safely replaces this script if the
+    # repo contains a copy of it, because the running copy keeps its own file.
+    for f in "$tmp"/* "$tmp"/.[!.]* "$tmp"/..?*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        name="$(basename "$f")"
+        rm -rf "./$name" 2>/dev/null
+        mv "$f" "./$name" || die "Couldn't move $name into place."
+    done
+    rmdir "$tmp" 2>/dev/null
+    trap - EXIT
+
+    n="$(git ls-files | wc -l | tr -d ' ')"
+    ok "Downloaded github.com/$repo ($n files, branch: $(current_branch))."
+
+    # Now apply the usual tidy-up to what came down.
+    ensure_gitignore
+    ensure_push_helper
+    if [ -n "$(git status --porcelain -- .gitignore)" ]; then
+        say "  The .gitignore change isn't committed yet - your next push will include it."
+    fi
+    check_tracked_ignored
+
+    echo
+    say "From now on, run ${B}./$SELF_NAME${R} for the menu, or ${B}./push.sh${R} to commit and push."
+}
+
+# Folder isn't a git repo yet: upload it, or download a repo into it?
+first_run() {
+    local mode=""
+    case "$1" in
+        download|clone|pull)  mode=download ;;
+        upload|push|setup)    mode=upload ;;
+    esac
+
+    if [ -z "$mode" ]; then
+        if folder_is_empty; then
+            info "This folder is empty, so gitkit will download a GitHub repo into it."
+            say  "  (To upload instead, add your files first.)"
+            mode=download
+        else
+            title "This folder isn't connected to GitHub yet"
+            say "  1) Upload this folder to a GitHub repo (replaces what's there)"
+            say "  2) Download a GitHub repo into this folder"
+            ask "Choose 1 or 2 (Enter to quit):"
+            case "$REPLY" in
+                1|u|upload)   mode=upload ;;
+                2|d|download) mode=download ;;
+                *) exit 0 ;;
+            esac
+        fi
+    fi
+
+    if [ "$mode" = "download" ]; then
+        download_repo
+    else
+        ensure_gitignore
+        ensure_push_helper
+        setup_repo
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -800,7 +940,8 @@ Usage:  ./$SELF_NAME             menu (or first-time setup)
   ${B}remote${R} [owner/name]    point this folder at a different GitHub repo
   ${B}wipe-history${R}           replace all history with one fresh commit
   ${B}open${R}                   open the repo on GitHub
-  ${B}setup${R}                  connect this folder to a GitHub repo
+  ${B}upload${R}                 first run only: push this folder to a GitHub repo
+  ${B}download${R}               first run only: download a GitHub repo into this folder
   ${B}help${R}                   this list
 
 Every run also makes sure .gitignore has the usual macOS/Windows/Linux junk
@@ -828,7 +969,7 @@ run_cmd() {
         remote)                     cmd_remote "$1" ;;
         wipe-history|wipe)          cmd_wipe_history ;;
         open|web)                   cmd_open ;;
-        setup)                      say "Already connected to $(repo_slug). Use 'remote' to change it." ;;
+        setup|upload|download|clone) say "Already connected to $(repo_slug). Use 'remote' to change it." ;;
         help|-h|--help)             cmd_help ;;
         *) err "Unknown command: $c"; say "Run ./$SELF_NAME help for the list."; return 1 ;;
     esac
@@ -889,12 +1030,15 @@ main() {
         -v|--version)   say "gitkit $VERSION"; exit 0 ;;
     esac
 
+    # Not a repo yet: decide upload vs download BEFORE creating any files, so a
+    # download isn't blocked by a .gitignore or push.sh we just made.
+    if [ ! -e .git ]; then
+        first_run "$1"; exit $?
+    fi
+
     ensure_gitignore
     ensure_push_helper
 
-    if [ ! -e .git ]; then
-        setup_repo; exit $?
-    fi
     if ! git remote get-url origin >/dev/null 2>&1; then
         warn "This is a git repo, but it isn't connected to GitHub yet."
         setup_repo; exit $?

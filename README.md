@@ -4,7 +4,10 @@ One script that puts a folder on GitHub and then handles the everyday git jobs f
 
 Copy `gitkit.sh` into any folder and run it:
 
-- **If the folder isn't a git repo yet**, it asks which GitHub repo to use (for example `your-name/my-project`), shows you what it's about to upload, asks you to confirm, and pushes. Whatever is in that GitHub repo gets replaced.
+- **If the folder is empty** (apart from gitkit), it asks which GitHub repo to use, for example `your-name/my-project`, and downloads it into the folder. It then applies its usual tidy-up to the downloaded copy (see below).
+- **If the folder has files but isn't a git repo yet**, it asks whether to upload or download:
+  - **Upload** shows you what's about to go up, asks you to confirm, and pushes. Whatever is in that GitHub repo gets replaced.
+  - **Download** pulls the repo in alongside your files. If anything in the repo has the same name as something already in the folder, it stops and changes nothing.
 - **If it already is one**, you get a menu for pushing, pulling, branching, undoing, tagging, and more.
 
 Every time it runs, it also tidies the folder:
@@ -56,6 +59,9 @@ Or just download `gitkit.sh` and drop it into the folder you want to manage.
 | `remote [owner/name]` | Points the folder at a different GitHub repo |
 | `wipe-history` | Replaces the branch's whole history with one fresh commit of your current files, and force-pushes it. Handy after committing a password or a huge file by mistake |
 | `open` | Opens the repo on github.com |
+| `upload` / `download` | First run only: skips the question and goes straight to uploading or downloading |
+
+After a download, any rules gitkit added to the repo's `.gitignore` are left uncommitted, so downloading never changes anything on GitHub by itself. Your next `push` includes them. If the repo already tracks a `push.sh` of its own, gitkit keeps it and tells you that you can `untrack` it.
 
 ## Safety
 
