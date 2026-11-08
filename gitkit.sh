@@ -195,8 +195,20 @@ push_sh_content() {
 set -e
 cd "$(dirname "$0")"
 
-# Nothing to do?
+# Nothing new to commit?
 if [ -z "$(git status --porcelain)" ]; then
+    # Still push any commits that haven't reached the remote yet.
+    ahead=0
+    if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+        ahead=$(git rev-list --count '@{u}..HEAD')
+    fi
+    if [ "$ahead" -gt 0 ]; then
+        echo "Nothing new to commit, but $ahead commit(s) not pushed yet:"
+        git log --oneline '@{u}..HEAD'
+        git push
+        echo "Pushed."
+        exit 0
+    fi
     echo "Nothing has changed since the last commit."
     exit 0
 fi
